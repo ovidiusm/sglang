@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import concurrent.futures
 import dataclasses
 import logging
 import struct
@@ -153,7 +152,6 @@ class NixlKVManager(CommonKVManager):
         self.perf_xfer = 0
 
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
-            self._init_transfer_executor()
             self._start_bootstrap_thread()
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
             self.transfer_statuses: Dict[int, TransferStatus] = defaultdict(
@@ -179,13 +177,6 @@ class NixlKVManager(CommonKVManager):
             raise ValueError(
                 f"Unsupported DisaggregationMode: {self.disaggregation_mode}"
             )
-
-    def _init_transfer_executor(self) -> None:
-        # Async transfer posting keeps the main thread responsive.
-        max_workers = envs.SGLANG_DISAGGREGATION_THREAD_POOL_SIZE.get() or 4
-        self.transfer_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=max_workers
-        )
 
     def _log_transfer_timing(self, label: str, start_time: float, extra: str = ""):
         elapsed_ms = (time.perf_counter() - start_time) * 1000.0
@@ -632,7 +623,7 @@ class NixlKVManager(CommonKVManager):
         )
         return xfer_handle
 
-    def _post_transfer_request(
+    def add_transfer_request(
         self,
         bootstrap_room: int,
         kv_indices: npt.NDArray[np.int32],
@@ -640,16 +631,11 @@ class NixlKVManager(CommonKVManager):
         is_last: bool,
         chunk_id: int,
         aux_index: Optional[int] = None,
-        enqueue_time: Optional[float] = None,
     ):
+        assert self.disaggregation_mode == DisaggregationMode.PREFILL
+        assert not is_last or (is_last and aux_index is not None)
+
         start_time = time.perf_counter()
-        if enqueue_time is not None:
-            logger.warning(
-                "NIXL transfer queue delay room=%s chunk=%s delay=%.3f ms",
-                bootstrap_room,
-                chunk_id,
-                (start_time - enqueue_time) * 1000.0,
-            )
         reqs_to_be_processed = self.transfer_infos[bootstrap_room].values()
         handles = []
         for req in reqs_to_be_processed:
@@ -711,31 +697,6 @@ class NixlKVManager(CommonKVManager):
             f"room={bootstrap_room} chunk={chunk_id} handles={len(handles)}",
         )
         return handles
-
-    def add_transfer_request(
-        self,
-        bootstrap_room: int,
-        kv_indices: npt.NDArray[np.int32],
-        index_slice: slice,
-        is_last: bool,
-        chunk_id: int,
-        aux_index: Optional[int] = None,
-    ):
-        assert self.disaggregation_mode == DisaggregationMode.PREFILL
-        assert not is_last or (is_last and aux_index is not None)
-
-        return [
-            self.transfer_executor.submit(
-                self._post_transfer_request,
-                bootstrap_room,
-                kv_indices,
-                index_slice,
-                is_last,
-                chunk_id,
-                aux_index,
-                time.perf_counter(),
-            )
-        ]
 
     def update_transfer_status(self):
         # Process notifications from received transfers.
@@ -822,7 +783,6 @@ class NixlKVSender(CommonKVSender):
     ):
         super().__init__(mgr, bootstrap_addr, bootstrap_room, dest_tp_ranks, pp_rank)
         self.xfer_handles = []
-        self.pending_futures = []
         self.has_sent = False
         self.chunk_id = 0
 
@@ -835,37 +795,23 @@ class NixlKVSender(CommonKVSender):
         self.curr_idx += len(kv_indices)
         is_last = self.curr_idx == self.num_kv_indices
 
-        self.pending_futures.extend(
-            self.kv_mgr.add_transfer_request(
-                self.bootstrap_room,
-                kv_indices,
-                index_slice,
-                is_last,
-                self.chunk_id,
-                self.aux_index,
-            )
+        new_xfer_handles = self.kv_mgr.add_transfer_request(
+            self.bootstrap_room,
+            kv_indices,
+            index_slice,
+            is_last,
+            self.chunk_id,
+            self.aux_index,
         )
+        self.xfer_handles.extend(new_xfer_handles)
         self.chunk_id += 1
         if is_last:
             self.has_sent = True
             del self.kv_mgr.request_status[self.bootstrap_room]
 
     def poll(self) -> KVPoll:
-        if self.pending_futures:
-            done, pending = [], []
-            for future in self.pending_futures:
-                if future.done():
-                    done.append(future)
-                else:
-                    pending.append(future)
-            self.pending_futures = pending
-            for future in done:
-                self.xfer_handles.extend(future.result())
-
         if not self.has_sent:
             return self.kv_mgr.check_status(self.bootstrap_room)
-        if self.pending_futures:
-            return KVPoll.WaitingForInput  # type: ignore
         states = [self.kv_mgr.agent.check_xfer_state(x) for x in self.xfer_handles]
         if all([x == "DONE" for x in states]):
             return KVPoll.Success  # type: ignore
