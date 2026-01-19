@@ -559,13 +559,18 @@ class NixlKVManager(CommonKVManager):
         )
         logger.warning(
             "NIXL send_kvcache_slice breakdown peer=%s notif=%s build_addrs=%.3f ms "
-            "get_descs=%.3f ms init=%.3f ms transfer=%.3f ms",
+            "get_descs=%.3f ms init=%.3f ms transfer=%.3f ms "
+            "layers=%d indices=%d page=%d descs=%d",
             peer_name,
             notif,
             (build_addrs_done - start_time) * 1000.0,
             (descs_done - build_addrs_done) * 1000.0,
             (init_done - descs_done) * 1000.0,
             (transfer_done - init_done) * 1000.0,
+            len(src_dst_ptr_pairs),
+            len(prefill_indices),
+            page_size,
+            len(src_addrs),
         )
         return xfer_handle
 
