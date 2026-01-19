@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import dataclasses
 import logging
 import struct
@@ -147,6 +148,7 @@ class NixlKVManager(CommonKVManager):
         self.register_buffer_to_engine()
 
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            self._init_transfer_executor()
             self._start_bootstrap_thread()
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
             self.transfer_statuses: Dict[int, TransferStatus] = defaultdict(
@@ -172,6 +174,13 @@ class NixlKVManager(CommonKVManager):
             raise ValueError(
                 f"Unsupported DisaggregationMode: {self.disaggregation_mode}"
             )
+
+    def _init_transfer_executor(self) -> None:
+        # Async transfer posting keeps the main thread responsive.
+        max_workers = envs.SGLANG_DISAGGREGATION_THREAD_POOL_SIZE.get() or 1
+        self.transfer_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers
+        )
 
     def _start_heartbeat_checker_thread(self):
         """
@@ -559,7 +568,7 @@ class NixlKVManager(CommonKVManager):
             raise Exception("KVSender failed to post transfer")
         return xfer_handle
 
-    def add_transfer_request(
+    def _post_transfer_request(
         self,
         bootstrap_room: int,
         kv_indices: npt.NDArray[np.int32],
@@ -568,9 +577,6 @@ class NixlKVManager(CommonKVManager):
         chunk_id: int,
         aux_index: Optional[int] = None,
     ):
-        assert self.disaggregation_mode == DisaggregationMode.PREFILL
-        assert not is_last or (is_last and aux_index is not None)
-
         reqs_to_be_processed = self.transfer_infos[bootstrap_room].values()
         handles = []
         for req in reqs_to_be_processed:
@@ -627,6 +633,30 @@ class NixlKVManager(CommonKVManager):
         if is_last:
             del self.transfer_infos[bootstrap_room]
         return handles
+
+    def add_transfer_request(
+        self,
+        bootstrap_room: int,
+        kv_indices: npt.NDArray[np.int32],
+        index_slice: slice,
+        is_last: bool,
+        chunk_id: int,
+        aux_index: Optional[int] = None,
+    ):
+        assert self.disaggregation_mode == DisaggregationMode.PREFILL
+        assert not is_last or (is_last and aux_index is not None)
+
+        return [
+            self.transfer_executor.submit(
+                self._post_transfer_request,
+                bootstrap_room,
+                kv_indices,
+                index_slice,
+                is_last,
+                chunk_id,
+                aux_index,
+            )
+        ]
 
     def update_transfer_status(self):
         # Process notifications from received transfers.
@@ -713,6 +743,7 @@ class NixlKVSender(CommonKVSender):
     ):
         super().__init__(mgr, bootstrap_addr, bootstrap_room, dest_tp_ranks, pp_rank)
         self.xfer_handles = []
+        self.pending_futures = []
         self.has_sent = False
         self.chunk_id = 0
 
@@ -725,23 +756,37 @@ class NixlKVSender(CommonKVSender):
         self.curr_idx += len(kv_indices)
         is_last = self.curr_idx == self.num_kv_indices
 
-        new_xfer_handles = self.kv_mgr.add_transfer_request(
-            self.bootstrap_room,
-            kv_indices,
-            index_slice,
-            is_last,
-            self.chunk_id,
-            self.aux_index,
+        self.pending_futures.extend(
+            self.kv_mgr.add_transfer_request(
+                self.bootstrap_room,
+                kv_indices,
+                index_slice,
+                is_last,
+                self.chunk_id,
+                self.aux_index,
+            )
         )
-        self.xfer_handles.extend(new_xfer_handles)
         self.chunk_id += 1
         if is_last:
             self.has_sent = True
             del self.kv_mgr.request_status[self.bootstrap_room]
 
     def poll(self) -> KVPoll:
+        if self.pending_futures:
+            done, pending = [], []
+            for future in self.pending_futures:
+                if future.done():
+                    done.append(future)
+                else:
+                    pending.append(future)
+            self.pending_futures = pending
+            for future in done:
+                self.xfer_handles.extend(future.result())
+
         if not self.has_sent:
             return self.kv_mgr.check_status(self.bootstrap_room)
+        if self.pending_futures:
+            return KVPoll.WaitingForInput  # type: ignore
         states = [self.kv_mgr.agent.check_xfer_state(x) for x in self.xfer_handles]
         if all([x == "DONE" for x in states]):
             return KVPoll.Success  # type: ignore
