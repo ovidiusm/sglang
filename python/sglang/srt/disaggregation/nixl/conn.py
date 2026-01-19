@@ -4,6 +4,7 @@ import concurrent.futures
 import dataclasses
 import logging
 import struct
+from itertools import repeat
 import threading
 import time
 import uuid
@@ -494,8 +495,8 @@ class NixlKVManager(CommonKVManager):
             for layer_id in range(layers_current_pp_stage)
         ]
 
-        prefill_indices = np.array(prefill_kv_indices, dtype=np.int64)
-        dst_indices = np.array(dst_kv_indices, dtype=np.int64)
+        prefill_indices = np.asarray(prefill_kv_indices, dtype=np.int64)
+        dst_indices = np.asarray(dst_kv_indices, dtype=np.int64)
         bytes_per_token_prefill = src_kv_item_len // page_size
         bytes_per_token_decode = dst_kv_item_len // page_size
         token_offsets = np.arange(page_size, dtype=np.int64)
@@ -519,16 +520,18 @@ class NixlKVManager(CommonKVManager):
             ).ravel()
 
             src_addrs.extend(
-                [
-                    (int(src_all[i]), heads_bytes_per_token_to_send, self.kv_args.gpu_id)
-                    for i in range(len(src_all))
-                ]
+                zip(
+                    src_all.tolist(),
+                    repeat(heads_bytes_per_token_to_send),
+                    repeat(self.kv_args.gpu_id),
+                )
             )
             dst_addrs.extend(
-                [
-                    (int(dst_all[i]), heads_bytes_per_token_to_send, dst_gpu_id)
-                    for i in range(len(dst_all))
-                ]
+                zip(
+                    dst_all.tolist(),
+                    repeat(heads_bytes_per_token_to_send),
+                    repeat(dst_gpu_id),
+                )
             )
 
         build_addrs_done = time.perf_counter()
