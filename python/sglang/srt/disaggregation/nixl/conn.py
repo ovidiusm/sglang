@@ -148,6 +148,11 @@ class NixlKVManager(CommonKVManager):
         self.register_buffer_to_engine()
 
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
+            self.async_transfers = envs.SGLANG_NIXL_ASYNC_XFER.get()
+            logger.warning(
+                "NIXL async transfer posting is %s",
+                "enabled" if self.async_transfers else "disabled",
+            )
             self._init_transfer_executor()
             self._start_bootstrap_thread()
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
@@ -176,6 +181,9 @@ class NixlKVManager(CommonKVManager):
             )
 
     def _init_transfer_executor(self) -> None:
+        if not self.async_transfers:
+            self.transfer_executor = None
+            return
         # Async transfer posting keeps the main thread responsive.
         max_workers = envs.SGLANG_DISAGGREGATION_THREAD_POOL_SIZE.get() or 1
         self.transfer_executor = concurrent.futures.ThreadPoolExecutor(
@@ -675,6 +683,15 @@ class NixlKVManager(CommonKVManager):
         assert self.disaggregation_mode == DisaggregationMode.PREFILL
         assert not is_last or (is_last and aux_index is not None)
 
+        if self.transfer_executor is None:
+            return self._post_transfer_request(
+                bootstrap_room,
+                kv_indices,
+                index_slice,
+                is_last,
+                chunk_id,
+                aux_index,
+            )
         return [
             self.transfer_executor.submit(
                 self._post_transfer_request,
@@ -785,16 +802,18 @@ class NixlKVSender(CommonKVSender):
         self.curr_idx += len(kv_indices)
         is_last = self.curr_idx == self.num_kv_indices
 
-        self.pending_futures.extend(
-            self.kv_mgr.add_transfer_request(
-                self.bootstrap_room,
-                kv_indices,
-                index_slice,
-                is_last,
-                self.chunk_id,
-                self.aux_index,
-            )
+        results = self.kv_mgr.add_transfer_request(
+            self.bootstrap_room,
+            kv_indices,
+            index_slice,
+            is_last,
+            self.chunk_id,
+            self.aux_index,
         )
+        if results and isinstance(results[0], concurrent.futures.Future):
+            self.pending_futures.extend(results)
+        else:
+            self.xfer_handles.extend(results)
         self.chunk_id += 1
         if is_last:
             self.has_sent = True
