@@ -373,13 +373,34 @@ class NixlKVManager(CommonKVManager):
 
         src_addrs = []
         dst_addrs = []
-        for src_ptr, dst_ptr, item_len in layers_params:
-            for prefill_index, decode_index in zip(prefill_kv_blocks, dst_kv_blocks):
-                src_addr = src_ptr + int(prefill_index[0]) * item_len
-                dst_addr = dst_ptr + int(decode_index[0]) * item_len
-                length = item_len * len(prefill_index)
-                src_addrs.append((src_addr, length, self.kv_args.gpu_id))
-                dst_addrs.append((dst_addr, length, dst_gpu_id))
+        if prefill_kv_blocks:
+            # Precompute block starts/lengths to reduce Python-level loops.
+            prefill_starts = np.fromiter(
+                (block[0] for block in prefill_kv_blocks), dtype=np.int64
+            )
+            dst_starts = np.fromiter(
+                (block[0] for block in dst_kv_blocks), dtype=np.int64
+            )
+            block_lens = np.fromiter(
+                (len(block) for block in prefill_kv_blocks), dtype=np.int64
+            )
+
+            for src_ptr, dst_ptr, item_len in layers_params:
+                lengths = (item_len * block_lens).tolist()
+                src_addrs.extend(
+                    zip(
+                        (src_ptr + prefill_starts * item_len).tolist(),
+                        lengths,
+                        repeat(self.kv_args.gpu_id),
+                    )
+                )
+                dst_addrs.extend(
+                    zip(
+                        (dst_ptr + dst_starts * item_len).tolist(),
+                        lengths,
+                        repeat(dst_gpu_id),
+                    )
+                )
 
         build_addrs_done = time.perf_counter()
         logger.debug(
