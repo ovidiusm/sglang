@@ -519,6 +519,7 @@ class NixlKVManager(CommonKVManager):
         # Use NIXL agent for transfer
         src_descs = self.agent.get_xfer_descs(src_addrs, "VRAM")
         dst_descs = self.agent.get_xfer_descs(dst_addrs, "VRAM")
+
         xfer_handle = self.agent.initialize_xfer(
             "WRITE", src_descs, dst_descs, peer_name, notif.encode("ascii")
         )
