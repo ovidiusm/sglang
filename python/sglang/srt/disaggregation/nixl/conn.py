@@ -368,9 +368,7 @@ class NixlKVManager(CommonKVManager):
         prefill_starts = np.fromiter(
             (block[0] for block in prefill_kv_blocks), dtype=np.int64
         )
-        dst_starts = np.fromiter(
-            (block[0] for block in dst_kv_blocks), dtype=np.int64
-        )
+        dst_starts = np.fromiter((block[0] for block in dst_kv_blocks), dtype=np.int64)
         block_lens = np.fromiter(
             (len(block) for block in prefill_kv_blocks), dtype=np.int64
         )
