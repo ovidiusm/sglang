@@ -3,11 +3,11 @@ from __future__ import annotations
 import dataclasses
 import logging
 import struct
-from itertools import repeat
 import threading
 import time
 import uuid
 from collections import defaultdict
+from itertools import repeat
 from typing import Dict, List, Optional, Set
 
 import numpy as np
@@ -146,10 +146,6 @@ class NixlKVManager(CommonKVManager):
             ) from e
         self.agent = nixl_agent(str(uuid.uuid4()), nixl_agent_config(num_threads=8))
         self.register_buffer_to_engine()
-        self.perf_calc = 0
-        self.perf_desc = 0
-        self.perf_prep = 0
-        self.perf_xfer = 0
 
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             self._start_bootstrap_thread()
@@ -367,34 +363,34 @@ class NixlKVManager(CommonKVManager):
 
         src_addrs = []
         dst_addrs = []
-        if prefill_kv_blocks:
-            # Precompute block starts/lengths to reduce Python-level loops.
-            prefill_starts = np.fromiter(
-                (block[0] for block in prefill_kv_blocks), dtype=np.int64
-            )
-            dst_starts = np.fromiter(
-                (block[0] for block in dst_kv_blocks), dtype=np.int64
-            )
-            block_lens = np.fromiter(
-                (len(block) for block in prefill_kv_blocks), dtype=np.int64
-            )
 
-            for src_ptr, dst_ptr, item_len in layers_params:
-                lengths = (item_len * block_lens).tolist()
-                src_addrs.extend(
-                    zip(
-                        (src_ptr + prefill_starts * item_len).tolist(),
-                        lengths,
-                        repeat(self.kv_args.gpu_id),
-                    )
+        # Precompute block starts/lengths to reduce Python-level loops.
+        prefill_starts = np.fromiter(
+            (block[0] for block in prefill_kv_blocks), dtype=np.int64
+        )
+        dst_starts = np.fromiter(
+            (block[0] for block in dst_kv_blocks), dtype=np.int64
+        )
+        block_lens = np.fromiter(
+            (len(block) for block in prefill_kv_blocks), dtype=np.int64
+        )
+
+        for src_ptr, dst_ptr, item_len in layers_params:
+            lengths = (item_len * block_lens).tolist()
+            src_addrs.extend(
+                zip(
+                    (src_ptr + prefill_starts * item_len).tolist(),
+                    lengths,
+                    repeat(self.kv_args.gpu_id),
                 )
-                dst_addrs.extend(
-                    zip(
-                        (dst_ptr + dst_starts * item_len).tolist(),
-                        lengths,
-                        repeat(dst_gpu_id),
-                    )
+            )
+            dst_addrs.extend(
+                zip(
+                    (dst_ptr + dst_starts * item_len).tolist(),
+                    lengths,
+                    repeat(dst_gpu_id),
                 )
+            )
 
         logger.debug(
             f"len(src_addrs): before group: {len(prefill_kv_indices)}, after group: {len(src_addrs)}"
@@ -411,11 +407,9 @@ class NixlKVManager(CommonKVManager):
         )
         if not xfer_handle:
             raise Exception("KVSender failed to create transfer")
-
         state = self.agent.transfer(xfer_handle)
         if state == "ERR":
             raise Exception("KVSender failed to post transfer")
-
         return xfer_handle
 
     def send_kvcache_slice(
