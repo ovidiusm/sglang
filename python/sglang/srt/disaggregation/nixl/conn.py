@@ -178,11 +178,6 @@ class NixlKVManager(CommonKVManager):
                 f"Unsupported DisaggregationMode: {self.disaggregation_mode}"
             )
 
-    def _log_transfer_timing(self, label: str, start_time: float, extra: str = ""):
-        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-        suffix = f" {extra}" if extra else ""
-        logger.warning("NIXL %s took %.3f ms%s", label, elapsed_ms, suffix)
-
     def _start_heartbeat_checker_thread(self):
         """
         Start the heartbeat checker thread for Decode worker.
@@ -330,7 +325,6 @@ class NixlKVManager(CommonKVManager):
         dst_gpu_id: int,
         notif: str,
     ):
-        start_time = time.perf_counter()
         # group by indices
         prefill_kv_blocks, dst_kv_blocks = group_concurrent_contiguous(
             prefill_kv_indices, dst_kv_indices
@@ -402,13 +396,11 @@ class NixlKVManager(CommonKVManager):
                     )
                 )
 
-        build_addrs_done = time.perf_counter()
         logger.debug(
             f"len(src_addrs): before group: {len(prefill_kv_indices)}, after group: {len(src_addrs)}"
         )
         src_descs = self.agent.get_xfer_descs(src_addrs, "VRAM")
         dst_descs = self.agent.get_xfer_descs(dst_addrs, "VRAM")
-        descs_done = time.perf_counter()
         # Transfer data
         xfer_handle = self.agent.initialize_xfer(
             "WRITE",
@@ -419,26 +411,11 @@ class NixlKVManager(CommonKVManager):
         )
         if not xfer_handle:
             raise Exception("KVSender failed to create transfer")
-        init_done = time.perf_counter()
+
         state = self.agent.transfer(xfer_handle)
         if state == "ERR":
             raise Exception("KVSender failed to post transfer")
-        transfer_done = time.perf_counter()
-        self._log_transfer_timing(
-            "send_kvcache",
-            start_time,
-            f"peer={peer_name} notif={notif} blocks={len(src_addrs)}",
-        )
-        logger.warning(
-            "NIXL send_kvcache breakdown peer=%s notif=%s build_addrs=%.3f ms "
-            "get_descs=%.3f ms init=%.3f ms transfer=%.3f ms",
-            peer_name,
-            notif,
-            (build_addrs_done - start_time) * 1000.0,
-            (descs_done - build_addrs_done) * 1000.0,
-            (init_done - descs_done) * 1000.0,
-            (transfer_done - init_done) * 1000.0,
-        )
+
         return xfer_handle
 
     def send_kvcache_slice(
@@ -454,7 +431,6 @@ class NixlKVManager(CommonKVManager):
         decode_tp_rank: int,
         dst_kv_item_len: int,
     ):
-        start_time = time.perf_counter()
         # Get configuration from kv_args
         local_tp_rank_in_group = self.kv_args.engine_rank % prefill_tp_size
         dst_tp_rank_in_group = decode_tp_rank % decode_tp_size
@@ -546,44 +522,19 @@ class NixlKVManager(CommonKVManager):
                 )
             )
 
-        build_addrs_done = time.perf_counter()
         # Use NIXL agent for transfer
         src_descs = self.agent.get_xfer_descs(src_addrs, "VRAM")
         dst_descs = self.agent.get_xfer_descs(dst_addrs, "VRAM")
-        descs_done = time.perf_counter()
-
         xfer_handle = self.agent.initialize_xfer(
             "WRITE", src_descs, dst_descs, peer_name, notif.encode("ascii")
         )
         if not xfer_handle:
             raise Exception("Failed to create sliced KV transfer")
 
-        init_done = time.perf_counter()
         state = self.agent.transfer(xfer_handle)
         if state == "ERR":
             raise Exception("Failed to post sliced KV transfer")
-        transfer_done = time.perf_counter()
 
-        self._log_transfer_timing(
-            "send_kvcache_slice",
-            start_time,
-            f"peer={peer_name} notif={notif} blocks={len(src_addrs)}",
-        )
-        logger.warning(
-            "NIXL send_kvcache_slice breakdown peer=%s notif=%s build_addrs=%.3f ms "
-            "get_descs=%.3f ms init=%.3f ms transfer=%.3f ms "
-            "layers=%d indices=%d page=%d descs=%d",
-            peer_name,
-            notif,
-            (build_addrs_done - start_time) * 1000.0,
-            (descs_done - build_addrs_done) * 1000.0,
-            (init_done - descs_done) * 1000.0,
-            (transfer_done - init_done) * 1000.0,
-            len(src_dst_ptr_pairs),
-            len(prefill_indices),
-            page_size,
-            len(src_addrs),
-        )
         return xfer_handle
 
     def send_aux(
@@ -594,7 +545,6 @@ class NixlKVManager(CommonKVManager):
         dst_aux_index: int,
         notif: str,
     ):
-        start_time = time.perf_counter()
         src_addrs = []
         dst_addrs = []
 
@@ -608,10 +558,8 @@ class NixlKVManager(CommonKVManager):
             src_addrs.append((src_addr, length, 0))
             dst_addrs.append((dst_addr, length, 0))
 
-        build_addrs_done = time.perf_counter()
         src_descs = self.agent.get_xfer_descs(src_addrs, "DRAM")
         dst_descs = self.agent.get_xfer_descs(dst_addrs, "DRAM")
-        descs_done = time.perf_counter()
         # Transfer data
         xfer_handle = self.agent.initialize_xfer(
             "WRITE",
@@ -622,26 +570,9 @@ class NixlKVManager(CommonKVManager):
         )
         if not xfer_handle:
             raise Exception("KVSender failed to create transfer")
-        init_done = time.perf_counter()
         state = self.agent.transfer(xfer_handle)
         if state == "ERR":
             raise Exception("KVSender failed to post transfer")
-        transfer_done = time.perf_counter()
-        self._log_transfer_timing(
-            "send_aux",
-            start_time,
-            f"peer={peer_name} notif={notif} blocks={len(src_addrs)}",
-        )
-        logger.warning(
-            "NIXL send_aux breakdown peer=%s notif=%s build_addrs=%.3f ms "
-            "get_descs=%.3f ms init=%.3f ms transfer=%.3f ms",
-            peer_name,
-            notif,
-            (build_addrs_done - start_time) * 1000.0,
-            (descs_done - build_addrs_done) * 1000.0,
-            (init_done - descs_done) * 1000.0,
-            (transfer_done - init_done) * 1000.0,
-        )
         return xfer_handle
 
     def add_transfer_request(
@@ -656,7 +587,6 @@ class NixlKVManager(CommonKVManager):
         assert self.disaggregation_mode == DisaggregationMode.PREFILL
         assert not is_last or (is_last and aux_index is not None)
 
-        start_time = time.perf_counter()
         reqs_to_be_processed = self.transfer_infos[bootstrap_room].values()
         handles = []
         for req in reqs_to_be_processed:
@@ -712,11 +642,6 @@ class NixlKVManager(CommonKVManager):
                 handles.append(aux_xfer_handle)
         if is_last:
             del self.transfer_infos[bootstrap_room]
-        self._log_transfer_timing(
-            "post_transfer_request",
-            start_time,
-            f"room={bootstrap_room} chunk={chunk_id} handles={len(handles)}",
-        )
         return handles
 
     def update_transfer_status(self):
