@@ -144,7 +144,10 @@ class NixlKVManager(CommonKVManager):
                 "https://github.com/ai-dynamo/nixl/blob/main/README.md "
                 "to run SGLang with NixlTransferEngine."
             ) from e
-        self.agent = nixl_agent(str(uuid.uuid4()), nixl_agent_config(num_threads=8))
+        num_threads = 8 if disaggregation_mode == DisaggregationMode.PREFILL else 1
+        self.agent = nixl_agent(
+            str(uuid.uuid4()), nixl_agent_config(num_threads=num_threads)
+        )
         self.register_buffer_to_engine()
 
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
