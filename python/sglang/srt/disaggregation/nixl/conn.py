@@ -148,7 +148,7 @@ class NixlKVManager(CommonKVManager):
             str(uuid.uuid4()),
             nixl_agent_config(
                 num_threads=(
-                    8 if disaggregation_mode == DisaggregationMode.PREFILL else 1
+                    8 if disaggregation_mode == DisaggregationMode.PREFILL else 0
                 )
             ),
         )
