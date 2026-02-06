@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import dataclasses
+import fcntl
+import json
 import logging
 import struct
 import threading
@@ -159,6 +161,7 @@ class NixlKVManager(CommonKVManager):
             )
         logger.info(f"NIXL KVManager initialized with backend: {backend}")
 
+        self._init_transfer_trace()
         self.register_buffer_to_engine()
 
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -298,6 +301,48 @@ class NixlKVManager(CommonKVManager):
     def record_failure(self, bootstrap_room: int, failure_reason: str):
         pass
 
+    def _init_transfer_trace(self):
+        self._trace_path = "/tmp/nixl_transfers.json"
+        self._trace_enabled = True
+
+    def _serialize_trace_reqs(self, reqs):
+        if reqs is None:
+            return []
+        if isinstance(reqs, np.ndarray):
+            if reqs.size == 0:
+                return []
+            return reqs.astype(np.int64).tolist()
+        return [[int(addr), int(length), int(gpu)] for addr, length, gpu in reqs]
+
+    def _record_transfer_segments(
+        self,
+        kind: str,
+        peer_name: str,
+        notif: str,
+        src_reqs,
+        dst_reqs,
+        extra: Optional[dict] = None,
+    ):
+        if not self._trace_enabled or not self._trace_path:
+            return
+        record = {
+            "ts": time.time(),
+            "kind": kind,
+            "peer": peer_name,
+            "notif": notif,
+            "src": self._serialize_trace_reqs(src_reqs),
+            "dst": self._serialize_trace_reqs(dst_reqs),
+        }
+        if extra:
+            record["extra"] = extra
+        line = json.dumps(record, separators=(",", ":"))
+        with open(self._trace_path, "a", encoding="utf-8") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                f.write(line + "\n")
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+
     def register_buffer_to_engine(self):
         kv_addrs = []
         for kv_data_ptr, kv_data_len in zip(
@@ -411,6 +456,18 @@ class NixlKVManager(CommonKVManager):
 
         src_reqs = make_req_array(src_addrs, src_lens, self.kv_args.gpu_id)
         dst_reqs = make_req_array(dst_addrs, dst_lens, dst_gpu_id)
+
+        self._record_transfer_segments(
+            "kvcache",
+            peer_name,
+            notif,
+            src_reqs,
+            dst_reqs,
+            extra={
+                "is_mla_backend": self.is_mla_backend,
+                "layers": layers_current_pp_stage,
+            },
+        )
 
         logger.debug(
             f"len(src_addrs): before group: {len(prefill_kv_indices)}, after group: {len(src_addrs)}"
@@ -541,6 +598,21 @@ class NixlKVManager(CommonKVManager):
         )
         dst_reqs = make_req_array(dst_addrs, heads_bytes_per_token_to_send, dst_gpu_id)
 
+        self._record_transfer_segments(
+            "kvcache_slice",
+            peer_name,
+            notif,
+            src_reqs,
+            dst_reqs,
+            extra={
+                "prefill_tp_size": prefill_tp_size,
+                "decode_tp_size": decode_tp_size,
+                "decode_tp_rank": decode_tp_rank,
+                "layers": layers_current_pp_stage,
+                "heads_bytes_per_token": heads_bytes_per_token_to_send,
+            },
+        )
+
         # Use NIXL agent for transfer
         src_descs = self.agent.get_xfer_descs(src_reqs, "VRAM")
         dst_descs = self.agent.get_xfer_descs(dst_reqs, "VRAM")
@@ -577,6 +649,18 @@ class NixlKVManager(CommonKVManager):
             dst_addr = dst_aux_ptrs[i] + length * dst_aux_index
             src_addrs.append((src_addr, length, 0))
             dst_addrs.append((dst_addr, length, 0))
+
+        self._record_transfer_segments(
+            "aux",
+            peer_name,
+            notif,
+            src_addrs,
+            dst_addrs,
+            extra={
+                "prefill_aux_index": prefill_aux_index,
+                "dst_aux_index": dst_aux_index,
+            },
+        )
 
         src_descs = self.agent.get_xfer_descs(src_addrs, "DRAM")
         dst_descs = self.agent.get_xfer_descs(dst_addrs, "DRAM")
