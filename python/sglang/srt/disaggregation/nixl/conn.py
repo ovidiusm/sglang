@@ -484,7 +484,8 @@ class NixlKVManager(CommonKVManager):
         dst_summary = self._summarize_stride_compressibility(dst_reqs)
         if kind == "kvcache_slice":
             logger.warning(
-                "slice src={%s} dst={%s}",
+                "slice page_size=%d src={%s} dst={%s}",
+                self.kv_args.page_size,
                 self._format_compressibility(src_summary, "src")
                 + f" avg={self.avg_reduction_src / self.avg_reduction_src_count:.0f}x",
                 self._format_compressibility(dst_summary, "dst")
