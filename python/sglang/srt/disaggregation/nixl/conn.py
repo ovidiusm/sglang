@@ -314,6 +314,158 @@ class NixlKVManager(CommonKVManager):
             return reqs.astype(np.int64).tolist()
         return [[int(addr), int(length), int(gpu)] for addr, length, gpu in reqs]
 
+    def _coerce_req_array(self, reqs):
+        if reqs is None:
+            return np.empty((0, 3), dtype=np.int64)
+        if isinstance(reqs, np.ndarray):
+            if reqs.size == 0:
+                return np.empty((0, 3), dtype=np.int64)
+            arr = reqs.astype(np.int64, copy=False)
+        else:
+            arr = np.asarray(reqs, dtype=np.int64)
+            if arr.size == 0:
+                return np.empty((0, 3), dtype=np.int64)
+
+        if arr.ndim != 2 or arr.shape[1] < 3:
+            return np.empty((0, 3), dtype=np.int64)
+        return arr[:, :3]
+
+    def _summarize_stride_compressibility(self, reqs):
+        arr = self._coerce_req_array(reqs)
+        n = int(arr.shape[0])
+        if n == 0:
+            return {
+                "segments": 0,
+                "descriptor_units": 0,
+                "compression_ratio": 0.0,
+                "stride_segment_ratio": 0.0,
+                "stride_byte_ratio": 0.0,
+                "contiguous_stride_byte_ratio": 0.0,
+                "top_patterns": [],
+            }
+
+        addrs = arr[:, 0]
+        lens = arr[:, 1]
+        gpus = arr[:, 2]
+
+        total_bytes = int(np.sum(lens))
+        descriptor_units = 0
+        stride_runs = 0
+        stride_segments = 0
+        stride_bytes = 0
+        contiguous_stride_bytes = 0
+
+        # Group repeated arithmetic-progression patterns:
+        # base + k * (send_size + skip_size), where send_size == transfer length.
+        # Aggregated by (send_size, skip_size), preserving one sample base/count.
+        pattern_stats = {}
+
+        i = 0
+        while i < n:
+            if i + 1 < n:
+                delta = int(addrs[i + 1] - addrs[i])
+                same_len = lens[i + 1] == lens[i]
+                same_gpu = gpus[i + 1] == gpus[i]
+
+                if delta > 0 and same_len and same_gpu:
+                    j = i + 1
+                    while j + 1 < n:
+                        if (
+                            int(addrs[j + 1] - addrs[j]) != delta
+                            or lens[j + 1] != lens[i]
+                            or gpus[j + 1] != gpus[i]
+                        ):
+                            break
+                        j += 1
+
+                    run_len = j - i + 1
+                    if run_len >= 2:
+                        send_size = int(lens[i])
+                        skip_size = delta - send_size
+                        run_bytes = run_len * send_size
+
+                        descriptor_units += 1
+                        stride_runs += 1
+                        stride_segments += run_len
+                        stride_bytes += run_bytes
+                        if skip_size == 0:
+                            contiguous_stride_bytes += run_bytes
+
+                        key = (send_size, skip_size)
+                        if key not in pattern_stats:
+                            pattern_stats[key] = {
+                                "runs": 0,
+                                "segments": 0,
+                                "bytes": 0,
+                                "sum_count": 0,
+                                "max_count": 0,
+                                "sample_base": int(addrs[i]),
+                            }
+                        stats = pattern_stats[key]
+                        stats["runs"] += 1
+                        stats["segments"] += run_len
+                        stats["bytes"] += run_bytes
+                        stats["sum_count"] += run_len
+                        stats["max_count"] = max(stats["max_count"], run_len)
+
+                        i = j + 1
+                        continue
+
+            descriptor_units += 1
+            i += 1
+
+        top_patterns = []
+        for (send_size, skip_size), stats in sorted(
+            pattern_stats.items(), key=lambda kv: kv[1]["bytes"], reverse=True
+        )[:3]:
+            avg_count = stats["sum_count"] / max(stats["runs"], 1)
+            top_patterns.append(
+                {
+                    "sample_base": stats["sample_base"],
+                    "send_size": send_size,
+                    "skip_size": skip_size,
+                    "avg_count": avg_count,
+                    "max_count": stats["max_count"],
+                    "runs": stats["runs"],
+                    "bytes": stats["bytes"],
+                }
+            )
+
+        return {
+            "segments": n,
+            "descriptor_units": descriptor_units,
+            "compression_ratio": 1.0 - (descriptor_units / max(n, 1)),
+            "stride_segment_ratio": stride_segments / max(n, 1),
+            "stride_byte_ratio": stride_bytes / max(total_bytes, 1),
+            "contiguous_stride_byte_ratio": contiguous_stride_bytes
+            / max(total_bytes, 1),
+            "top_patterns": top_patterns,
+        }
+
+    def _format_compressibility(self, summary):
+        desc = max(summary["descriptor_units"], 1)
+        reduction_x = summary["segments"] / desc
+        patterns = summary["top_patterns"]
+        if patterns:
+            pattern_str = ";".join(
+                (
+                    f"base=0x{p['sample_base']:x},send={p['send_size']},skip={p['skip_size']},"
+                    f"avg_count={p['avg_count']:.1f},max_count={p['max_count']},runs={p['runs']}"
+                )
+                for p in patterns
+            )
+        else:
+            pattern_str = "none"
+        return (
+            f"segments={summary['segments']} desc={summary['descriptor_units']} "
+            f"desc_reduction_x={reduction_x:.2f}x "
+            f"desc_compress={summary['compression_ratio']:.2%} "
+            f"stride_seg_cov={summary['stride_segment_ratio']:.2%} "
+            f"stride_byte_cov={summary['stride_byte_ratio']:.2%} "
+            f"contig_stride_byte_cov={summary['contiguous_stride_byte_ratio']:.2%} "
+            f"top={pattern_str}"
+        )
+
     def _record_transfer_segments(
         self,
         kind: str,
@@ -323,6 +475,17 @@ class NixlKVManager(CommonKVManager):
         dst_reqs,
         extra: Optional[dict] = None,
     ):
+        src_summary = self._summarize_stride_compressibility(src_reqs)
+        dst_summary = self._summarize_stride_compressibility(dst_reqs)
+        logger.warning(
+            "nixl_transfer_compressibility kind=%s peer=%s notif=%s src={%s} dst={%s}",
+            kind,
+            peer_name,
+            notif,
+            self._format_compressibility(src_summary),
+            self._format_compressibility(dst_summary),
+        )
+
         if not self._trace_enabled or not self._trace_path:
             return
         record = {
@@ -610,6 +773,7 @@ class NixlKVManager(CommonKVManager):
                 "decode_tp_rank": decode_tp_rank,
                 "layers": layers_current_pp_stage,
                 "heads_bytes_per_token": heads_bytes_per_token_to_send,
+                "page_size": page_size,
             },
         )
 
