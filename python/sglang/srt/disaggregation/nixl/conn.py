@@ -467,8 +467,8 @@ class NixlKVManager(CommonKVManager):
             pattern_str = "none"
         return (
             f"bufs={summary['segments']} descs={summary['descriptor_units']} "
-            f"reduction={reduction_x}x"
-            f"top_pattern={pattern_str}"
+            f"reduction={reduction_x}x "
+            f"pattern={pattern_str}"
         )
 
     def _record_transfer_segments(
