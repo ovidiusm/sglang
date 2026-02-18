@@ -510,8 +510,7 @@ class NixlKVManager(CommonKVManager):
             )
             if self._slice_log_count % self._compress_summary_every == 0:
                 logger.warning(
-                    "slice_reduction_dist every=%d src={%s} dst={%s}",
-                    self._compress_summary_every,
+                    "slice_reduction_dist src={%s} dst={%s}",
                     self._format_reduction_dist(self._reduction_src_dist),
                     self._format_reduction_dist(self._reduction_dst_dist),
                 )
