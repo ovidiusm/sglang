@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import collections
 import dataclasses
-import fcntl
-import json
 import logging
+import os
 import struct
 import threading
 import time
@@ -302,21 +302,11 @@ class NixlKVManager(CommonKVManager):
         pass
 
     def _init_transfer_trace(self):
-        self._trace_path = "/tmp/nixl_transfers.json"
-        self._trace_enabled = True
-        self.avg_reduction_src = 0
-        self.avg_reduction_src_count = 0
-        self.avg_reduction_dst = 0
-        self.avg_reduction_dst_count = 0
-
-    def _serialize_trace_reqs(self, reqs):
-        if reqs is None:
-            return []
-        if isinstance(reqs, np.ndarray):
-            if reqs.size == 0:
-                return []
-            return reqs.astype(np.int64).tolist()
-        return [[int(addr), int(length), int(gpu)] for addr, length, gpu in reqs]
+        self._trace_enabled = os.getenv("SGLANG_NIXL_TRACE_ENABLED", "0") == "1"
+        self._compress_summary_every = 100
+        self._slice_log_count = 0
+        self._reduction_src_dist = collections.Counter()
+        self._reduction_dst_dist = collections.Counter()
 
     def _coerce_req_array(self, reqs):
         if reqs is None:
@@ -446,29 +436,33 @@ class NixlKVManager(CommonKVManager):
             "top_patterns": top_patterns,
         }
 
-    def _format_compressibility(self, summary, kind):
+    def _reduction_x(self, summary):
         desc = max(summary["descriptor_units"], 1)
-        reduction_x = round(summary["segments"] / desc)
-        if kind == "src":
-            self.avg_reduction_src += reduction_x
-            self.avg_reduction_src_count += 1
-        elif kind == "dst":
-            self.avg_reduction_dst += reduction_x
-            self.avg_reduction_dst_count += 1
-        patterns = summary["top_patterns"]
-        if patterns:
-            pattern_str = ";".join(
-                (
-                    f"send={p['send_size']},skip={p['skip_size']},avg_count={p['avg_count']:.1f},runs={p['runs']}"
-                )
-                for p in patterns
-            )
-        else:
-            pattern_str = "none"
+        return round(summary["segments"] / desc)
+
+    def _quantile_from_counter(self, dist, q):
+        total = sum(dist.values())
+        if total == 0:
+            return 0
+        target = int((total - 1) * q)
+        running = 0
+        for reduction_x, cnt in sorted(dist.items()):
+            running += cnt
+            if running > target:
+                return int(reduction_x)
+        return int(max(dist.keys()))
+
+    def _format_reduction_dist(self, dist):
+        total = sum(dist.values())
+        if total == 0:
+            return "n=0"
+        max_reduction = max(dist.keys())
         return (
-            f"bufs={summary['segments']} descs={summary['descriptor_units']} "
-            f"reduction={reduction_x}x "
-            f"pattern={pattern_str}"
+            f"n={total} "
+            f"p50={self._quantile_from_counter(dist, 0.50)}x "
+            f"p90={self._quantile_from_counter(dist, 0.90)}x "
+            f"p99={self._quantile_from_counter(dist, 0.99)}x "
+            f"max={max_reduction}x"
         )
 
     def _record_transfer_segments(
@@ -480,37 +474,30 @@ class NixlKVManager(CommonKVManager):
         dst_reqs,
         extra: Optional[dict] = None,
     ):
+        if not self._trace_enabled:
+            return
         src_summary = self._summarize_stride_compressibility(src_reqs)
         dst_summary = self._summarize_stride_compressibility(dst_reqs)
         if kind == "kvcache_slice":
+            src_reduction = self._reduction_x(src_summary)
+            dst_reduction = self._reduction_x(dst_summary)
+            self._slice_log_count += 1
+            self._reduction_src_dist[src_reduction] += 1
+            self._reduction_dst_dist[dst_reduction] += 1
             logger.warning(
-                "slice page_size=%d src={%s} dst={%s}",
+                "slice page_size=%d bufs=%d src=%dx dst=%dx",
                 self.kv_args.page_size,
-                self._format_compressibility(src_summary, "src")
-                + f" avg={self.avg_reduction_src / self.avg_reduction_src_count:.0f}x",
-                self._format_compressibility(dst_summary, "dst")
-                + f" avg={self.avg_reduction_dst / self.avg_reduction_dst_count:.0f}x",
+                src_summary["segments"],
+                src_reduction,
+                dst_reduction,
             )
-
-        if not self._trace_enabled or not self._trace_path:
-            return
-        record = {
-            "ts": time.time(),
-            "kind": kind,
-            "peer": peer_name,
-            "notif": notif,
-            "src": self._serialize_trace_reqs(src_reqs),
-            "dst": self._serialize_trace_reqs(dst_reqs),
-        }
-        if extra:
-            record["extra"] = extra
-        line = json.dumps(record, separators=(",", ":"))
-        with open(self._trace_path, "a", encoding="utf-8") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
-                f.write(line + "\n")
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
+            if self._slice_log_count % self._compress_summary_every == 0:
+                logger.warning(
+                    "slice_reduction_dist every=%d src={%s} dst={%s}",
+                    self._compress_summary_every,
+                    self._format_reduction_dist(self._reduction_src_dist),
+                    self._format_reduction_dist(self._reduction_dst_dist),
+                )
 
     def register_buffer_to_engine(self):
         kv_addrs = []
