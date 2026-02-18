@@ -465,14 +465,22 @@ class NixlKVManager(CommonKVManager):
             f"max={max_reduction}x"
         )
 
-    def _format_top_pattern(self, summary):
+    def _format_compressibility(self, summary):
+        reduction_x = self._reduction_x(summary)
         patterns = summary.get("top_patterns", [])
-        if not patterns:
-            return "none"
-        p = patterns[0]
+        if patterns:
+            pattern_str = ";".join(
+                (
+                    f"send={p['send_size']},skip={p['skip_size']},"
+                    f"avg_count={p['avg_count']:.1f},runs={p['runs']}"
+                )
+                for p in patterns
+            )
+        else:
+            pattern_str = "none"
         return (
-            f"send={p['send_size']},skip={p['skip_size']},"
-            f"avg_count={p['avg_count']:.1f},runs={p['runs']}"
+            f"bufs={summary['segments']} descs={summary['descriptor_units']} "
+            f"reduction={reduction_x}x pattern={pattern_str}"
         )
 
     def _record_transfer_segments(
@@ -495,13 +503,10 @@ class NixlKVManager(CommonKVManager):
             self._reduction_src_dist[src_reduction] += 1
             self._reduction_dst_dist[dst_reduction] += 1
             logger.warning(
-                "slice page_size=%d bufs=%d src=%dx(%s) dst=%dx(%s)",
+                "slice page_size=%d src={%s} dst={%s}",
                 self.kv_args.page_size,
-                src_summary["segments"],
-                src_reduction,
-                self._format_top_pattern(src_summary),
-                dst_reduction,
-                self._format_top_pattern(dst_summary),
+                self._format_compressibility(src_summary),
+                self._format_compressibility(dst_summary),
             )
             if self._slice_log_count % self._compress_summary_every == 0:
                 logger.warning(
