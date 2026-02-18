@@ -304,6 +304,10 @@ class NixlKVManager(CommonKVManager):
     def _init_transfer_trace(self):
         self._trace_path = "/tmp/nixl_transfers.json"
         self._trace_enabled = True
+        self.avg_reduction_src = 0
+        self.avg_reduction_src_count = 0
+        self.avg_reduction_dst = 0
+        self.avg_reduction_dst_count = 0
 
     def _serialize_trace_reqs(self, reqs):
         if reqs is None:
@@ -442,9 +446,15 @@ class NixlKVManager(CommonKVManager):
             "top_patterns": top_patterns,
         }
 
-    def _format_compressibility(self, summary):
+    def _format_compressibility(self, summary, kind):
         desc = max(summary["descriptor_units"], 1)
-        reduction_x = summary["segments"] / desc
+        reduction_x = round(summary["segments"] / desc)
+        if kind == "src":
+            self.avg_reduction_src += reduction_x
+            self.avg_reduction_src_count += 1
+        elif kind == "dst":
+            self.avg_reduction_dst += reduction_x
+            self.avg_reduction_dst_count += 1
         patterns = summary["top_patterns"]
         if patterns:
             pattern_str = ";".join(
@@ -457,7 +467,7 @@ class NixlKVManager(CommonKVManager):
             pattern_str = "none"
         return (
             f"bufs={summary['segments']} descs={summary['descriptor_units']} "
-            f"reduction={reduction_x:.2f}x "
+            f"reduction={reduction_x}x"
             f"top_pattern={pattern_str}"
         )
 
@@ -475,8 +485,10 @@ class NixlKVManager(CommonKVManager):
         if kind == "kvcache_slice":
             logger.warning(
                 "slice src={%s} dst={%s}",
-                self._format_compressibility(src_summary),
-                self._format_compressibility(dst_summary),
+                self._format_compressibility(src_summary, "src")
+                + f" avg={self.avg_reduction_src / self.avg_reduction_src_count:.0f}x",
+                self._format_compressibility(dst_summary, "dst")
+                + f" avg={self.avg_reduction_dst / self.avg_reduction_dst_count:.0f}x",
             )
 
         if not self._trace_enabled or not self._trace_path:
