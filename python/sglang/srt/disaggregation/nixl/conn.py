@@ -449,21 +449,16 @@ class NixlKVManager(CommonKVManager):
         if patterns:
             pattern_str = ";".join(
                 (
-                    f"base=0x{p['sample_base']:x},send={p['send_size']},skip={p['skip_size']},"
-                    f"avg_count={p['avg_count']:.1f},max_count={p['max_count']},runs={p['runs']}"
+                    f"send={p['send_size']},skip={p['skip_size']},avg_count={p['avg_count']:.1f},runs={p['runs']}"
                 )
                 for p in patterns
             )
         else:
             pattern_str = "none"
         return (
-            f"segments={summary['segments']} desc={summary['descriptor_units']} "
-            f"desc_reduction_x={reduction_x:.2f}x "
-            f"desc_compress={summary['compression_ratio']:.2%} "
-            f"stride_seg_cov={summary['stride_segment_ratio']:.2%} "
-            f"stride_byte_cov={summary['stride_byte_ratio']:.2%} "
-            f"contig_stride_byte_cov={summary['contiguous_stride_byte_ratio']:.2%} "
-            f"top={pattern_str}"
+            f"bufs={summary['segments']} descs={summary['descriptor_units']} "
+            f"reduction={reduction_x:.2f}x "
+            f"top_pattern={pattern_str}"
         )
 
     def _record_transfer_segments(
@@ -477,14 +472,12 @@ class NixlKVManager(CommonKVManager):
     ):
         src_summary = self._summarize_stride_compressibility(src_reqs)
         dst_summary = self._summarize_stride_compressibility(dst_reqs)
-        logger.warning(
-            "nixl_transfer_compressibility kind=%s peer=%s notif=%s src={%s} dst={%s}",
-            kind,
-            peer_name,
-            notif,
-            self._format_compressibility(src_summary),
-            self._format_compressibility(dst_summary),
-        )
+        if kind == "kvcache_slice":
+            logger.warning(
+                "slice src={%s} dst={%s}",
+                self._format_compressibility(src_summary),
+                self._format_compressibility(dst_summary),
+            )
 
         if not self._trace_enabled or not self._trace_path:
             return
