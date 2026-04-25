@@ -83,6 +83,40 @@ class TimeStats:
     # maintain unit consistency with other timestamp fields tracked by the `ReqState` class.
     prefill_finished_ts: float = 0.0
 
+    # Stub methods for upstream main's observability calls used in disaggregation
+    class _NoopTraceCtx:
+        def abort(self, **kwargs):
+            pass
+
+    trace_ctx = _NoopTraceCtx()
+
+    def set_bootstrap_done_time(self):
+        pass
+
+    def set_completion_time(self):
+        pass
+
+    def set_decode_transfer_queue_entry_time(self):
+        pass
+
+    def set_last_chunked_prefill_finish_time(self):
+        pass
+
+    def set_prefill_finished_time(self):
+        pass
+
+    def set_prefill_kv_transfer_finish_time(self):
+        pass
+
+    def set_prefill_transfer_queue_entry_time(self):
+        pass
+
+    def set_wait_queue_entry_time(self):
+        pass
+
+    def compute_and_observe_kv_transfer_metrics(self, *args, **kwargs):
+        return None
+
     def get_queueing_time(self) -> float:
         return self.forward_entry_time - self.wait_queue_entry_time
 

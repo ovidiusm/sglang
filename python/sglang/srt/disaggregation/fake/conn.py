@@ -14,6 +14,11 @@ from sglang.srt.disaggregation.base.conn import (
 logger = logging.getLogger(__name__)
 
 
+class FakeKVManager(BaseKVManager):
+    def __init__(self, *args, **kwargs):
+        pass
+
+
 # For warmup reqs, we don't kv transfer, we use the fake sender and receiver
 class FakeKVSender(BaseKVSender):
     def __init__(
@@ -88,6 +93,9 @@ class FakeKVReceiver(BaseKVReceiver):
         logger.debug(
             f"FakeKVReceiver init with kv_indices: {kv_indices}, aux_index: {aux_index}, state_indices: {state_indices}"
         )
+
+    def send_metadata(self, kv_indices, aux_index=None, state_indices=None):
+        pass
 
     def failure_exception(self):
         raise Exception("Fake KVReceiver Exception")
