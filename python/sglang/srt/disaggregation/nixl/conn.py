@@ -837,11 +837,21 @@ class NixlKVManager(CommonKVManager):
                 raise RuntimeError(
                     f"PD Disaggregation does NOT support PD different TP sizes for non-MLA {state_type.upper()} hybrid models yet."
                 )
-            if len(prefill_state_indices) != len(dst_state_indices):
-                raise RuntimeError(
-                    f"State index length mismatch: prefill={len(prefill_state_indices)}, "
-                    f"dst={len(dst_state_indices)}"
+            # Symmetric clipping: prefill and decode may produce slightly
+            # different state index counts due to page-alignment differences.
+            # Clip the longer side and warn, matching Mooncake behavior (PR #23323).
+            if len(prefill_state_indices) > len(dst_state_indices):
+                logger.warning(
+                    f"len(prefill_state_indices) = {len(prefill_state_indices)}, "
+                    f"len(dst_state_indices) = {len(dst_state_indices)}"
                 )
+                prefill_state_indices = prefill_state_indices[: len(dst_state_indices)]
+            elif len(prefill_state_indices) < len(dst_state_indices):
+                logger.warning(
+                    f"len(prefill_state_indices) = {len(prefill_state_indices)}, "
+                    f"len(dst_state_indices) = {len(dst_state_indices)}"
+                )
+                dst_state_indices = dst_state_indices[: len(prefill_state_indices)]
             return self._send_kvcache_generic(
                 peer_name=peer_name,
                 src_data_ptrs=self.kv_args.state_data_ptrs,
